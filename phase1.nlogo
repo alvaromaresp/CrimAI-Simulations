@@ -14,7 +14,10 @@ breed [nodes node]
 nodes-own [attract]
 
 breed [ citizens citizen ]
-citizens-own [ speed node-goal cur-node path inactive-time c-type moving? cur-speed]
+citizens-own [ speed node-goal cur-node path inactive-time c-type moving? cur-speed prob-out]
+
+breed [ criminals criminal ]
+criminals-own [ speed node-goal cur-node path inactive-time c-type moving? cur-speed prob-out]
 
 breed [ searchers search ]
 searchers-own [ memory cost total-expected-cost localization active? ]
