@@ -9,15 +9,21 @@ globals [
   max-speed
   min-speed
   c-types
+  crime-history-sf
+  attract-sf
+  time-weight
+  density-weight
+  crime-history-weight
+  meters-per-patch
 ]
 breed [nodes node]
-nodes-own [attract]
+nodes-own [attract crime-history density recent-crime]
 
 breed [ citizens citizen ]
-citizens-own [ speed node-goal cur-node path inactive-time c-type moving? cur-speed prob-out]
+citizens-own [ speed node-home node-goal cur-goal awake-time return-time cur-node path c-type on-roam? active? cur-speed prob-out victim-record recent-crime ]
 
 breed [ criminals criminal ]
-criminals-own [ speed node-goal cur-node path inactive-time c-type moving? cur-speed prob-out]
+criminals-own [ speed node-home node-goal awake-time return-time cur-node path c-type on-roam? active? cur-speed prob-out ]
 
 breed [ searchers search ]
 searchers-own [ memory cost total-expected-cost localization active? ]
@@ -35,39 +41,55 @@ to setup
   display-buildings
   setup-paths-graph
 
-  set max-speed  meters-per-patch * 2.4 * 60
-  set min-speed  meters-per-patch * 1.6 * 60
+  set meters-per-patch meters-per-patch-function
+  set max-speed 2.4 * 60 / meters-per-patch
+  set min-speed 1.6 * 60 / meters-per-patch
+  set time-weight 0.4
+  set density-weight 0.3
+  set crime-history-weight 0.3
+
+  set crime-history-sf 0.1
+  set attract-sf 0.1
 
   set c-types ["Worker" "Student" "Buyer"]
   setup-citizens
   set cur-day 0
   set cur-hour 0
   set cur-min 0
+
+
+
+  ask nodes [
+    density-at-node 100
+  ]
+
   reset-ticks
 
 end
 
 to go
-  ask citizens [
-    ifelse moving? = true [
-      move-citizen cur-speed
-    ][
-      set inactive-time (inactive-time - 1)
-      set cur-speed 0
-      if inactive-time = 0 [
-        set inactive-time 480
-        set moving? true
-        set cur-speed speed
-        set hidden? false
-      ]
-    ]
-  ]
-  time-update
-  ;;if cur-hour = 8 or cur-hour = 18 and cur-min = 0[
-  ;;  setup-shift
-  ;;]
 
-  tick ;; tick called after patch/turtle updates but before plots -- see manual
+  time-update
+  ask citizens [
+     citizen-schedule
+
+   ]
+
+  ask nodes [
+    density-at-node 100
+    environment-attract cur-hour
+    crime-history-node
+  ]
+
+  tick ;; tick called after patch/turtle updates but before plots
+end
+
+
+to-report random-normal-in-bounds [mid dev mmin mmax]
+  let result random-normal mid dev
+  if result < mmin or result > mmax
+    [ report random-normal-in-bounds mid dev mmin mmax ]
+  report result
 end
 
 to time-update
@@ -84,8 +106,19 @@ to time-update
   ]
 end
 
+to-report teta-at [t]
+  report abs(0.1301 * t - 1.387) / 1.6053;
+end
+
+to environment-attract [t]
+  set attract (attract + attract-sf * ((density * density-weight + teta-at (t - 1) * time-weight + (1 - crime-history) * crime-history-weight) / (density-weight + time-weight + crime-history-weight)))
+end
+
 to-report heuristic [#Goal]
-  report [distance [localization] of myself] of #Goal
+  if [attract] of #Goal = 0 [
+    report [distance [localization] of myself] of #Goal
+  ]
+  report [distance [localization] of myself] of #Goal / [attract] of #Goal
 end
 
 to display-roads
@@ -129,24 +162,69 @@ to-report new-node-at [x y] ; returns a node at x,y creating one if there isn't 
       setxy x y
       set size 1
       set n self
-      set attract precision random-float(1) 4
+      set crime-history precision random-normal-in-bounds 0.5 0.5 0 1 4
+      set recent-crime false
     ]
   ]
   report n
 end
 
-to-report meters-per-patch ;; maybe should be in gis: extension?
+to-report meters-per-patch-function
   let world gis:world-envelope ; [ minimum-x maximum-x minimum-y maximum-y ]
   let x-meters-per-patch (item 1 world - item 0 world) / (max-pxcor - min-pxcor)
   let y-meters-per-patch (item 3 world - item 2 world) / (max-pycor - min-pycor)
   report mean list x-meters-per-patch y-meters-per-patch
 end
 
+to crime-history-node
+
+  ifelse recent-crime [
+    set crime-history 1
+    set recent-crime false
+  ][
+    set crime-history crime-history * crime-history-sf
+  ]
+end
+
 to setup-citizens
   set-default-shape citizens "circle"
-  ;; let citizen-size 10 * meters-per-patch
 
   create-citizens number-of-agents[
+    set color green
+    set size 0.5 ;; use meters-per-patch??
+    set speed min-speed + random-float (max-speed - min-speed)
+    set cur-speed speed
+    let l one-of links
+    set node-goal one-of nodes
+    while [node-goal = [end1] of l][
+      set node-goal one-of nodes
+    ]
+
+    set awake-time floor random-normal-in-bounds 8 2 0 23
+    set return-time floor random-normal-in-bounds 18 2 0 23
+    set node-home ([end1] of l)
+    set path (A* node-home node-goal)
+    move-to (node-home)
+    face item 1 path
+    set cur-goal node-goal
+
+
+    set active? false
+    set on-roam? false
+    set cur-node 0
+    set c-type one-of c-types
+    set victim-record precision random-normal-in-bounds 0.5 0.5 0 1 4
+    set recent-crime false
+  ]
+
+
+end
+
+to setup-criminal
+  set-default-shape criminals "circle"
+  ;; let citizen-size 10 * meters-per-patch
+
+  create-criminals number-of-agents / 3 [
     set color red
     set size 0.5 ;; use meters-per-patch??
     set speed min-speed + random-float (max-speed - min-speed)
@@ -156,61 +234,131 @@ to setup-citizens
     while [node-goal = [end1] of l][
       set node-goal one-of nodes
     ]
-    ;;set node-home one-of nodes
+
+    set awake-time floor random-normal-in-bounds 8 2 0 23
+    set return-time floor random-normal-in-bounds 18 2 0 23
+
+    show awake-time
+    show return-time
+
     set path (A* ([end1] of l) node-goal)
     move-to ([end1] of l)
     face item 1 path
+    set cur-goal node-goal
+
+
+    set active? false
+    set on-roam? false
+    set node-home item 0 path
     set cur-node 0
-    set inactive-time 480 + random (600 - 480)
-    set moving? true
-    set c-type one-of c-types
   ]
-  ;;ask n-of (number-of-agents / 2) citizens [
-  ;;  hide-turtle
-  ;;  set cur-speed 0
-  ;;]
+
+
 end
 
-to setup-shift
-  ask citizens [
-    ifelse hidden? = false [
-      hide-turtle
-      set speed 0
-    ][
-      show-turtle
-      set speed min-speed + random-float (max-speed - min-speed)
+to-report at-home?
+  let flag false
+
+  if xcor = [xcor] of node-home and ycor = [ycor] of node-home[
+    set flag true
+  ]
+
+  report flag
+end
+
+to-report at-goal?
+  let flag false
+
+  if xcor = [xcor] of cur-goal and  ycor = [ycor] of cur-goal[
+    set flag true
+  ]
+  report flag
+end
+
+to density-at-node [radius]
+
+  set density count citizens in-radius radius / meters-per-patch
+
+end
+
+to citizen-schedule
+
+  set prob-out random-float 1
+
+  if (cur-hour = awake-time or cur-hour = return-time) and not active? [
+    set active? true
+  ]
+
+  if (cur-hour >= return-time and at-home?) or (cur-hour > awake-time and cur-hour < return-time and node-goal = cur-goal and at-goal?) and active?[
+    set active? false
+  ]
+
+  ifelse active? [
+    move-citizen cur-speed
+  ][
+
+    if at-goal? [
+      ifelse cur-goal != node-home [
+        set path (A* node-goal node-home)
+        set cur-goal node-home
+      ][
+        set path (A* node-home node-goal)
+        set cur-goal node-goal
+      ]
+
+      set cur-node 0
     ]
   ]
 
 end
 
-
-to move-citizen [dist] ;; citizen proc
-  let aux_p [path] of self
-
-  if (cur-node + 1) = length aux_p [
-    set hidden? true
-    set moving? false
-    set aux_p reverse aux_p
-    set cur-node 0
-    set path aux_p
+to criminal-schedule
+  if (cur-hour = awake-time or cur-hour = return-time) and not active? [
+    set active? true
   ]
 
-  let dxnode distance item (cur-node + 1) [path] of self
+  if (cur-hour >= return-time and at-home?) or (cur-hour > awake-time and cur-hour < return-time and node-goal = cur-goal and at-goal?) and active?[
+    set active? false
+  ]
 
-  if length aux_p > 1 [
-    ifelse dxnode > dist [
-      forward dist
-    ] [
-      set cur-node (cur-node + 1)
-      move-to item cur-node aux_p
+  ifelse active? [
+    move-citizen cur-speed
+  ][
 
-      ifelse (cur-node + 1) < length aux_p[
-        face item (cur-node + 1) aux_p
+    if at-goal? [
+      ifelse cur-goal != node-home [
+        set cur-goal node-home
       ][
-        face item (cur-node - 1) aux_p
+        set cur-goal node-goal
       ]
-      move-citizen dist - dxnode
+      set path reverse path
+      set cur-node 0
+    ]
+  ]
+end
+
+to move-citizen [dist] ;; citizen proc CHANGE FLIPPING
+  let aux_p [path] of self
+
+  if cur-node + 1 < length aux_p [
+    ;;show ticks
+    let dxnode distance item (cur-node + 1) [path] of self
+
+    if length aux_p > 1 [
+      ifelse dxnode > dist [
+        forward dist
+      ] [
+        set cur-node (cur-node + 1)
+        move-to item cur-node aux_p
+
+        ifelse (cur-node + 1) < length aux_p [
+          face item (cur-node + 1) aux_p
+        ] [
+          face item (cur-node - 1) aux_p
+        ]
+
+        move-citizen dist - dxnode
+      ]
     ]
   ]
 
@@ -232,10 +380,7 @@ to-report A* [#Start #Goal]
   ] ]
   ; The main loop will run while the Goal has not been reached and we have active
   ;   searchers to inspect. That means that a path connecting start and goal is
-  ;   still possible. In a next, and more general version, of this algorithm we
-  ;   will change the main loop and remove the reaching stop, but in the
-  ;   "geometrical" case, where the heuristic is exactly the same measure as the
-  ;   length link, we can stop as soon as we reach the goal in the first time.
+  ;   still possible.
   while [not any? searchers with [localization = #Goal] and any? searchers with [active?]]
   [
     ; From the active searchers we take one with the minimal expected total cost to the goal
@@ -295,12 +440,6 @@ end
 to-report searchers-in-loc
   report searchers with [localization = myself]
 end
-
-to toggle-citizen
-  ifelse mean [size] of citizens = 6
-  [ ask citizens [set size size / meters-per-patch set speed speed / meters-per-patch ] ]
-  [ ask citizens [set size 6 set speed speed * meters-per-patch ] ]
-end
 @#$#@#$#@
 GRAPHICS-WINDOW
 210
@@ -323,8 +462,8 @@ GRAPHICS-WINDOW
 20
 -20
 20
-0
-0
+1
+1
 1
 ticks
 30.0
@@ -363,16 +502,53 @@ NIL
 NIL
 1
 
-INPUTBOX
-1033
-175
-1194
-235
-number-of-agents
-100.0
+MONITOR
+1044
+321
+1101
+366
+Hour
+cur-hour
+17
 1
-0
-Number
+11
+
+MONITOR
+1120
+322
+1183
+367
+Minutes
+cur-min
+17
+1
+11
+
+MONITOR
+969
+322
+1026
+367
+Day
+cur-day
+17
+1
+11
+
+SLIDER
+942
+186
+1158
+219
+number-of-agents
+number-of-agents
+100
+10000
+100.0
+100
+1
+NIL
+HORIZONTAL
 
 @#$#@#$#@
 ## DO QUE SE TRATA?
