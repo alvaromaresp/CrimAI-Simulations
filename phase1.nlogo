@@ -11,19 +11,28 @@ globals [
   c-types
   crime-history-sf
   attract-sf
+  victim-record-sf
+  guardian-sf
+  aware-sf
   time-weight
   density-weight
   crime-history-weight
   meters-per-patch
+  citizen-attract-radius
+  robbery-impact-radius
+  criminal-home-radius
+  criminal-guardian-radius
+  density-radius
+  robbery-num
 ]
 breed [nodes node]
 nodes-own [attract crime-history density recent-crime]
 
 breed [ citizens citizen ]
-citizens-own [ speed node-home node-goal cur-goal awake-time return-time cur-node path c-type on-roam? active? cur-speed prob-out victim-record recent-crime ]
+citizens-own [ speed node-home node-goal cur-goal awake-time return-time cur-node path c-type on-roam? active? cur-speed awareness prob-out victim-record recent-crime ]
 
 breed [ criminals criminal ]
-criminals-own [ speed node-home node-goal awake-time return-time cur-node path c-type on-roam? active? cur-speed prob-out ]
+criminals-own [ speed node-home node-goal cur-goal awake-time return-time cur-node path active? cur-speed ]
 
 breed [ searchers search ]
 searchers-own [ memory cost total-expected-cost localization active? ]
@@ -48,19 +57,30 @@ to setup
   set density-weight 0.3
   set crime-history-weight 0.3
 
+  set density-radius 100 / meters-per-patch
+  set robbery-impact-radius 100 / meters-per-patch
+  set citizen-attract-radius 100 / meters-per-patch
+  set criminal-home-radius 100 / meters-per-patch
+  set criminal-guardian-radius 100 / meters-per-patch
+
+
   set crime-history-sf 0.1
   set attract-sf 0.1
+  set victim-record-sf 0.1
+  set guardian-sf 0.1
+  set aware-sf 0.1
 
   set c-types ["Worker" "Student" "Buyer"]
   setup-citizens
+  setup-criminals
   set cur-day 0
   set cur-hour 0
   set cur-min 0
 
-
+  set robbery-num 0
 
   ask nodes [
-    density-at-node 100
+    density-at-node density-radius
   ]
 
   reset-ticks
@@ -72,18 +92,22 @@ to go
   time-update
   ask citizens [
      citizen-schedule
-
+     victim-record-update
    ]
 
+  ask criminals [
+    criminal-schedule
+    robbery
+  ]
+
   ask nodes [
-    density-at-node 100
+    density-at-node density-radius
     environment-attract cur-hour
     crime-history-node
   ]
 
   tick ;; tick called after patch/turtle updates but before plots
 end
-
 
 to-report random-normal-in-bounds [mid dev mmin mmax]
   let result random-normal mid dev
@@ -114,8 +138,12 @@ to environment-attract [t]
   set attract (attract + attract-sf * ((density * density-weight + teta-at (t - 1) * time-weight + (1 - crime-history) * crime-history-weight) / (density-weight + time-weight + crime-history-weight)))
 end
 
-to-report heuristic [#Goal]
-  if [attract] of #Goal = 0 [
+to-report heuristic-citizen [#Goal]
+  report [distance [localization] of myself] of #Goal / (1 - [attract] of #Goal)
+end
+
+to-report heuristic-criminal [#Goal]
+  if ([attract] of #Goal = 0)[
     report [distance [localization] of myself] of #Goal
   ]
   report [distance [localization] of myself] of #Goal / [attract] of #Goal
@@ -186,6 +214,23 @@ to crime-history-node
   ]
 end
 
+to victim-record-update
+  ifelse recent-crime [
+    set victim-record 1
+    set recent-crime false
+  ][
+    set victim-record victim-record * victim-record-sf
+  ]
+end
+
+to-report affecting-node-attract [agent]
+  report [attract] of min-one-of nodes in-radius citizen-attract-radius [distance agent]
+end
+
+to victim-awareness
+  set awareness (victim-record + (1 - affecting-node-attract myself))/ 2
+end
+
 to setup-citizens
   set-default-shape citizens "circle"
 
@@ -203,7 +248,7 @@ to setup-citizens
     set awake-time floor random-normal-in-bounds 8 2 0 23
     set return-time floor random-normal-in-bounds 18 2 0 23
     set node-home ([end1] of l)
-    set path (A* node-home node-goal)
+    set path (A*-citizen node-home node-goal)
     move-to (node-home)
     face item 1 path
     set cur-goal node-goal
@@ -215,41 +260,39 @@ to setup-citizens
     set c-type one-of c-types
     set victim-record precision random-normal-in-bounds 0.5 0.5 0 1 4
     set recent-crime false
+
+    set prob-out precision random-float 1 4
   ]
 
 
 end
 
-to setup-criminal
+to setup-criminals
   set-default-shape criminals "circle"
   ;; let citizen-size 10 * meters-per-patch
 
-  create-criminals number-of-agents / 3 [
+  create-criminals number-of-agents * 0.1 [
     set color red
     set size 0.5 ;; use meters-per-patch??
     set speed min-speed + random-float (max-speed - min-speed)
     set cur-speed speed
     let l one-of links
     set node-goal one-of nodes
-    while [node-goal = [end1] of l][
+    while [node-goal = [end1] of l and ([distance node-home] of node-goal <= criminal-home-radius)] [
       set node-goal one-of nodes
     ]
 
-    set awake-time floor random-normal-in-bounds 8 2 0 23
-    set return-time floor random-normal-in-bounds 18 2 0 23
+    set awake-time floor random-normal-in-bounds 14 2 0 23
+    set return-time floor random-normal-in-bounds 4 2 0 23
 
-    show awake-time
-    show return-time
-
-    set path (A* ([end1] of l) node-goal)
-    move-to ([end1] of l)
+    set node-home ([end1] of l)
+    set path (A*-citizen node-home node-goal)
+    move-to (node-home)
     face item 1 path
     set cur-goal node-goal
 
 
     set active? false
-    set on-roam? false
-    set node-home item 0 path
     set cur-node 0
   ]
 
@@ -277,67 +320,104 @@ end
 
 to density-at-node [radius]
 
-  set density count citizens in-radius radius / meters-per-patch
+  set density count citizens in-radius radius
 
 end
 
 to citizen-schedule
 
-  set prob-out random-float 1
 
-  if (cur-hour = awake-time or cur-hour = return-time) and not active? [
-    set active? true
-  ]
+  let aux_random precision random-float 1 4
 
-  if (cur-hour >= return-time and at-home?) or (cur-hour > awake-time and cur-hour < return-time and node-goal = cur-goal and at-goal?) and active?[
-    set active? false
-  ]
-
-  ifelse active? [
-    move-citizen cur-speed
-  ][
-
-    if at-goal? [
-      ifelse cur-goal != node-home [
-        set path (A* node-goal node-home)
-        set cur-goal node-home
-      ][
-        set path (A* node-home node-goal)
-        set cur-goal node-goal
-      ]
-
-      set cur-node 0
+  if (not active?)[
+    if aux_random < prob-out[
+      set on-roam? true
+      set cur-goal one-of nodes
+      set path (A*-citizen node-home cur-goal)
     ]
   ]
 
+  ifelse not on-roam? [
+    if (cur-hour = awake-time or cur-hour = return-time) and not active? [
+      set active? true
+    ]
+
+    if (cur-hour >= return-time and at-home?) or (cur-hour > awake-time and cur-hour < return-time and node-goal = cur-goal and at-goal?) and active?[
+      set prob-out precision random-float 1 4
+      set active? false
+    ]
+
+    ifelse active? [
+      move-agent cur-speed
+    ][
+
+      if at-goal? [
+        ifelse cur-goal != node-home [
+          set path (A*-citizen node-goal node-home)
+          set cur-goal node-home
+        ][
+          set path (A*-citizen node-home node-goal)
+          set cur-goal node-goal
+        ]
+
+      ]
+    ]
+  ][
+    move-agent cur-speed
+
+    if at-goal? [
+      ifelse at-home? [
+        set on-roam? false
+      ][
+        set path (A*-citizen node-goal node-home)
+      ]
+    ]
+  ]
+
+
+
 end
+
+
+to-report max-target-attract-in-loc
+  report [((1 - affecting-node-attract myself) * guardian-sf + (1 - awareness) * aware-sf) / (guardian-sf + aware-sf)] of max-one-of citizens [ ((1 - affecting-node-attract myself) * guardian-sf + (1 - awareness) * aware-sf) / (guardian-sf + aware-sf)]
+end
+
+to robbery
+  let prob precision random-normal-in-bounds 0.5 0.5 0 1 4
+
+  if (prob < max-target-attract-in-loc)[
+    set robbery-num robbery-num + 1
+  ]
+end
+
 
 to criminal-schedule
-  if (cur-hour = awake-time or cur-hour = return-time) and not active? [
+  if (cur-hour = awake-time) [
     set active? true
   ]
 
-  if (cur-hour >= return-time and at-home?) or (cur-hour > awake-time and cur-hour < return-time and node-goal = cur-goal and at-goal?) and active?[
+  if (cur-hour >= return-time and at-home?) and active?[
     set active? false
   ]
 
-  ifelse active? [
-    move-citizen cur-speed
-  ][
+  if active? [
+    move-agent cur-speed
+  ]
 
-    if at-goal? [
-      ifelse cur-goal != node-home [
-        set cur-goal node-home
-      ][
-        set cur-goal node-goal
-      ]
-      set path reverse path
-      set cur-node 0
+  if at-goal? [
+    ifelse cur-hour >= return-time[
+      set path (A*-criminal node-goal node-home)
+    ][
+      let aux_node one-of nodes with [[distance node-home] of node-goal <= criminal-home-radius]
+      set path (A*-criminal cur-goal aux_node)
+      set cur-goal aux_node
     ]
   ]
+
 end
 
-to move-citizen [dist] ;; citizen proc CHANGE FLIPPING
+to move-agent [dist] ;; citizen proc
   let aux_p [path] of self
 
   if cur-node + 1 < length aux_p [
@@ -357,14 +437,14 @@ to move-citizen [dist] ;; citizen proc CHANGE FLIPPING
           face item (cur-node - 1) aux_p
         ]
 
-        move-citizen dist - dxnode
+        move-agent dist - dxnode
       ]
     ]
   ]
 
 end
 
-to-report A* [#Start #Goal]
+to-report A*-criminal [#Start #Goal]
   ; Create a searcher for the Start node
   ask #Start
   [
@@ -375,7 +455,7 @@ to-report A* [#Start #Goal]
       set localization myself
       set memory (list localization) ; the partial path will have only this node at the beginning
       set cost 0
-      set total-expected-cost cost + heuristic #Goal ; Compute the expected cost
+      set total-expected-cost cost + heuristic-criminal #Goal ; Compute the expected cost
       set active? true ; It is active, because we didn't calculate its neighbors yet
   ] ]
   ; The main loop will run while the Goal has not been reached and we have active
@@ -414,7 +494,80 @@ to-report A* [#Start #Goal]
             set memory lput localization ([memory] of this-searcher) ; The path is
                                                      ; built from the original searcher
             set cost c                               ; Real cost to reach this node
-            set total-expected-cost cost + heuristic #Goal ; Expected cost to reach the
+            set total-expected-cost cost + heuristic-criminal #Goal ; Expected cost to reach the
+                                                           ;   goal by using this path
+            set active? true                         ; It is active to be explored
+            ask other searchers-in-loc [die]         ; Remove other searchers in this node
+  ] ] ] ] ]
+  ; When the loop has finished, we have two options:
+  ;   - no path has been built,
+  ;   - or a searcher has reached the goal
+  ; By default the return will be false (no path has been built)
+  let res false
+  ; But if it is the second option...
+  if any? searchers with [localization = #Goal]
+  [
+    ; we will return the path stored in the memory of the searcher that reached the goal
+    let lucky-searcher one-of searchers with [localization = #Goal]
+    set res [memory] of lucky-searcher
+  ]
+  ; Remove the searchers (we don't want the A* report to leave any trash)
+  ask searchers [die]
+  ; And report the result
+  report res
+end
+
+to-report A*-citizen [#Start #Goal]
+  ; Create a searcher for the Start node
+  ask #Start
+  [
+    hatch-searchers 1
+    [
+      set shape "circle"
+      set color white
+      set localization myself
+      set memory (list localization) ; the partial path will have only this node at the beginning
+      set cost 0
+      set total-expected-cost cost + heuristic-citizen #Goal ; Compute the expected cost
+      set active? true ; It is active, because we didn't calculate its neighbors yet
+  ] ]
+  ; The main loop will run while the Goal has not been reached and we have active
+  ;   searchers to inspect. That means that a path connecting start and goal is
+  ;   still possible.
+  while [not any? searchers with [localization = #Goal] and any? searchers with [active?]]
+  [
+    ; From the active searchers we take one with the minimal expected total cost to the goal
+    ask min-one-of (searchers with [active?]) [total-expected-cost]
+    [
+      ; We will explore its neighbors in this block, so we deactivated it
+      set active? false
+      ; Store this searcher and its localization in temporal variables to facilitate their use
+      let this-searcher self
+      let Lorig localization
+      ; For every neighbor node of this location...
+      ask ([link-neighbors] of Lorig)
+      [
+        ; Take the link that connect it to the Location of the searcher
+        let connection link-with Lorig
+        ; Compute the cost to reach the neighbor in this path as the previous cost plus the
+        ;   length of the link
+        let c ([cost] of this-searcher) + [link-length] of connection
+        ; Maybe in this node there are other searchers (comming from other nodes).
+        ; If this new path is better than others to reach this node, then we put a
+        ;   new searcher and remove the old ones. Search-in-loc is an auxiliary
+        ;   report that you can find bellow.
+        if not any? searchers-in-loc with [cost < c]
+        [
+          hatch-searchers 1
+          [
+            set shape "circle"
+            set color white
+            set localization myself                  ; The location of the new
+                                                     ;   searcher is this neighbor node
+            set memory lput localization ([memory] of this-searcher) ; The path is
+                                                     ; built from the original searcher
+            set cost c                               ; Real cost to reach this node
+            set total-expected-cost cost + heuristic-citizen #Goal ; Expected cost to reach the
                                                            ;   goal by using this path
             set active? true                         ; It is active to be explored
             ask other searchers-in-loc [die]         ; Remove other searchers in this node
@@ -549,6 +702,24 @@ number-of-agents
 1
 NIL
 HORIZONTAL
+
+PLOT
+942
+23
+1142
+173
+Robbery
+Hour
+Num of Robbery
+0.0
+100.0
+0.0
+100.0
+true
+false
+"" ""
+PENS
+"default" 1.0 0 -2674135 true "" "plot count robbery-num"
 
 @#$#@#$#@
 ## DO QUE SE TRATA?
