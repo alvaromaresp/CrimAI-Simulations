@@ -322,7 +322,6 @@ to citizen-schedule
   ]
 
   if (cur-hour >= return-time and at-home?) or (cur-hour > awake-time and cur-hour < return-time and node-goal = cur-goal and at-goal?) and active?[
-    set prob-out precision random-float 1 4
     set active? false
   ]
 
@@ -339,6 +338,8 @@ to citizen-schedule
       ]
 
     ]
+    set cur-node 0
+    face item 1 path
   ]
 
 
@@ -375,10 +376,13 @@ to criminal-schedule
   if at-goal? [
     ifelse cur-hour >= return-time[
       set path reverse path
+
     ][
       set cur-goal node-goal
       set path reverse path
     ]
+   set cur-node 0
+   face item 1 path
   ]
 
 end
@@ -387,7 +391,7 @@ to move-agent [dist] ;; citizen proc
   let aux_p [path] of self
 
   if cur-node + 1 < length aux_p [
-    ;;show ticks
+
     let dxnode distance item (cur-node + 1) [path] of self
 
     if length aux_p > 1 [
@@ -588,9 +592,9 @@ SLIDER
 219
 number-of-agents
 number-of-agents
-100
+1
 10000
-100.0
+1.0
 100
 1
 NIL
