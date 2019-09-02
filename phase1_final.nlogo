@@ -23,18 +23,21 @@ globals [
   criminal-guardian-radius
   density-radius
   robbery-num
+  encounters-num
 ]
+
 breed [nodes node]
-nodes-own [attract crime-history density recent-crime]
+nodes-own [attract crime-history density recent-crime location]
 
 breed [ citizens citizen ]
-citizens-own [ speed node-home node-goal cur-goal awake-time return-time cur-node path c-type on-roam? active? cur-speed awareness prob-out victim-record recent-crime ]
+citizens-own [ speed node-home node-goal cur-goal awake-time return-time cur-pos path c-type on-roam? active? cur-speed awareness prob-out victim-record target-attract recent-crime ]
 
 breed [ criminals criminal ]
-criminals-own [ speed node-home node-goal cur-goal awake-time return-time cur-node path active? cur-speed ]
+criminals-own [ speed node-home node-goal cur-goal awake-time return-time cur-node path active? cur-speed robbed? mapped? cur-pos]
 
 breed [ searchers search ]
 searchers-own [ memory cost total-expected-cost localization active? ]
+
 
 to setup
   clear-all
@@ -76,12 +79,90 @@ to setup
   set cur-min 0
 
   set robbery-num 0
+  set encounters-num 0
 
   ask nodes [
     density-at-node density-radius
+    set location self
   ]
 
   reset-ticks
+
+end
+
+to setup-citizens
+  set-default-shape citizens "circle"
+
+  create-citizens number-of-agents[
+    set color green
+    set size 0.5 ;; use meters-per-patch??
+    set speed min-speed + random-float (max-speed - min-speed)
+    set cur-speed speed
+    let l one-of links
+    set node-goal one-of nodes
+    while [node-goal = [end1] of l][
+      set node-goal one-of nodes
+    ]
+
+    set awake-time floor random-normal-in-bounds 8 2 0 23
+    set return-time floor random-normal-in-bounds 18 2 0 23
+    set node-home ([end1] of l)
+    set path (A* node-home node-goal)
+    move-to (node-home)
+    face item 1 path
+    set cur-goal node-goal
+
+
+    set active? false
+    ;set on-roam? false
+    set cur-pos 0
+
+
+    set victim-record precision random-normal-in-bounds 0.5 0.5 0 1 4
+    set target-attract precision random-normal-in-bounds 0.5 0.5 0 1 4
+    set awareness precision random-normal-in-bounds 0.5 0.5 0 1 4
+    set recent-crime false
+
+    set prob-out precision random-float 1 4
+  ]
+
+
+end
+
+to setup-criminals
+  set-default-shape criminals "circle"
+  ;; let citizen-size 10 * meters-per-patch
+
+  create-criminals number-of-agents * 0.1 [
+    set color red
+    set size 0.5 ;; use meters-per-patch??
+    set speed min-speed + random-float (max-speed - min-speed)
+    set cur-speed speed
+    let l one-of links
+;    set node-goal one-of nodes
+    set node-home ([end1] of l)
+;    while [node-goal = [end1] of l and ([distance node-home] of node-goal <= criminal-home-radius)] [
+;      set node-goal one-of nodes
+;    ]
+
+    set awake-time floor random-normal-in-bounds 14 2 0 23
+    set return-time floor random-normal-in-bounds 4 2 0 23
+
+;    set path (A* node-home node-goal)
+    move-to (node-home)
+;    face item 1 path
+;    set cur-goal node-goal
+
+
+    set active? false
+    set robbed? false
+    set mapped? false
+;    set cur-node 0
+
+    set cur-goal one-of [link-neighbors] of node-home
+    set cur-node node-home
+  ]
+
 
 end
 
@@ -91,6 +172,8 @@ to go
   ask citizens [
      citizen-schedule
      victim-record-update
+     victim-awareness
+     target-attract-update
    ]
 
   ask criminals [
@@ -107,13 +190,6 @@ to go
   tick ;; tick called after patch/turtle updates but before plots
 end
 
-to-report random-normal-in-bounds [mid dev mmin mmax]
-  let result random-normal mid dev
-  if result < mmin or result > mmax
-    [ report random-normal-in-bounds mid dev mmin mmax ]
-  report result
-end
-
 to time-update
   set cur-min (cur-min + 1)
 
@@ -128,16 +204,11 @@ to time-update
   ]
 end
 
-to-report teta-at [t]
-  report abs(0.1301 * t - 1.387) / 1.6053;
-end
-
-to environment-attract [t]
-  set attract (attract + attract-sf * ((density * density-weight + teta-at (t - 1) * time-weight + (1 - crime-history) * crime-history-weight) / (density-weight + time-weight + crime-history-weight)))
-end
-
-to-report heuristic [#Goal]
-  report [distance [localization] of myself] of #Goal
+to-report meters-per-patch-function
+  let world gis:world-envelope ; [ minimum-x maximum-x minimum-y maximum-y ]
+  let x-meters-per-patch (item 1 world - item 0 world) / (max-pxcor - min-pxcor)
+  let y-meters-per-patch (item 3 world - item 2 world) / (max-pycor - min-pycor)
+  report mean list x-meters-per-patch y-meters-per-patch
 end
 
 to display-roads
@@ -148,18 +219,6 @@ end
 to display-buildings
   gis:set-drawing-color blue
   gis:draw buildings-dataset 1
-end
-
-to setup-paths-graph
-  set-default-shape nodes "circle"
-  foreach polylines-of roads-dataset 3 [ ?1 ->
-    (foreach butlast ?1 butfirst ?1 [ [??1 ??2] -> if ??1 != ??2 [ ;; skip nodes on top of each other due to rounding
-      let n1 new-node-at first ??1 last ??1
-      let n2 new-node-at first ??2 last ??2
-      ask n1 [create-link-with n2]
-    ] ])
-  ]
-  ask nodes [hide-turtle]
 end
 
 to-report polylines-of [dataset decimalplaces]
@@ -188,230 +247,23 @@ to-report new-node-at [x y] ; returns a node at x,y creating one if there isn't 
   report n
 end
 
-to-report meters-per-patch-function
-  let world gis:world-envelope ; [ minimum-x maximum-x minimum-y maximum-y ]
-  let x-meters-per-patch (item 1 world - item 0 world) / (max-pxcor - min-pxcor)
-  let y-meters-per-patch (item 3 world - item 2 world) / (max-pycor - min-pycor)
-  report mean list x-meters-per-patch y-meters-per-patch
+to setup-paths-graph
+  set-default-shape nodes "circle"
+  foreach polylines-of roads-dataset 3 [ ?1 ->
+    (foreach butlast ?1 butfirst ?1 [ [??1 ??2] -> if ??1 != ??2 [ ;; skip nodes on top of each other due to rounding
+      let n1 new-node-at first ??1 last ??1
+      let n2 new-node-at first ??2 last ??2
+      ask n1 [create-link-with n2]
+    ] ])
+  ]
+  ask nodes [hide-turtle]
 end
 
-to crime-history-node
-
-  ifelse recent-crime [
-    set crime-history 1
-    set recent-crime false
-  ][
-    set crime-history crime-history * crime-history-sf
-  ]
-end
-
-to victim-record-update
-  ifelse recent-crime [
-    set victim-record 1
-    set recent-crime false
-  ][
-    set victim-record victim-record * victim-record-sf
-  ]
-end
-
-to-report affecting-node-attract [agent]
-  report [attract] of min-one-of nodes in-radius citizen-attract-radius [distance agent]
-end
-
-to victim-awareness
-  set awareness (victim-record + (1 - affecting-node-attract myself))/ 2
-end
-
-to setup-citizens
-  set-default-shape citizens "circle"
-
-  create-citizens number-of-agents[
-    set color green
-    set size 0.5 ;; use meters-per-patch??
-    set speed min-speed + random-float (max-speed - min-speed)
-    set cur-speed speed
-    let l one-of links
-    set node-goal one-of nodes
-    while [node-goal = [end1] of l][
-      set node-goal one-of nodes
-    ]
-
-    set awake-time floor random-normal-in-bounds 8 2 0 23
-    set return-time floor random-normal-in-bounds 18 2 0 23
-    set node-home ([end1] of l)
-    set path (A* node-home node-goal)
-    move-to (node-home)
-    face item 1 path
-    set cur-goal node-goal
-
-
-    set active? false
-    set on-roam? false
-    set cur-node 0
-
-    set victim-record precision random-normal-in-bounds 0.5 0.5 0 1 4
-    set recent-crime false
-
-    set prob-out precision random-float 1 4
-  ]
-
-
-end
-
-to setup-criminals
-  set-default-shape criminals "circle"
-  ;; let citizen-size 10 * meters-per-patch
-
-  create-criminals number-of-agents * 0.1 [
-    set color red
-    set size 0.5 ;; use meters-per-patch??
-    set speed min-speed + random-float (max-speed - min-speed)
-    set cur-speed speed
-    let l one-of links
-    set node-goal one-of nodes
-    while [node-goal = [end1] of l and ([distance node-home] of node-goal <= criminal-home-radius)] [
-      set node-goal one-of nodes
-    ]
-
-    set awake-time floor random-normal-in-bounds 14 2 0 23
-    set return-time floor random-normal-in-bounds 4 2 0 23
-
-    set node-home ([end1] of l)
-    set path (A* node-home node-goal)
-    move-to (node-home)
-    face item 1 path
-    set cur-goal node-goal
-
-
-    set active? false
-    set cur-node 0
-  ]
-
-
-end
-
-to-report at-home?
-  let flag false
-
-  if xcor = [xcor] of node-home and ycor = [ycor] of node-home[
-    set flag true
-  ]
-
-  report flag
-end
-
-to-report at-goal?
-  let flag false
-
-  if xcor = [xcor] of cur-goal and  ycor = [ycor] of cur-goal[
-    set flag true
-  ]
-  report flag
-end
-
-to density-at-node [radius]
-
-  set density count citizens in-radius radius
-
-end
-
-to citizen-schedule
-
-  if (cur-hour = awake-time or cur-hour = return-time) and not active? [
-    set active? true
-  ]
-
-  if (cur-hour >= return-time and at-home?) or (cur-hour > awake-time and cur-hour < return-time and node-goal = cur-goal and at-goal?) and active?[
-    set active? false
-  ]
-
-  ifelse active? [
-    move-agent cur-speed
-  ][
-    if at-goal? [
-      ifelse cur-goal != node-home [
-        set cur-goal node-home
-        set path reverse path
-      ][
-        set cur-goal node-goal
-        set path reverse path
-      ]
-
-    ]
-    set cur-node 0
-    face item 1 path
-  ]
-
-
-
-end
-
-
-to-report max-target-attract-in-loc
-  report [((1 - affecting-node-attract myself) * guardian-sf + (1 - awareness) * aware-sf) / (guardian-sf + aware-sf)] of max-one-of citizens [ ((1 - affecting-node-attract myself) * guardian-sf + (1 - awareness) * aware-sf) / (guardian-sf + aware-sf)]
-end
-
-to robbery
-  let prob precision random-normal-in-bounds 0.5 0.5 0 1 4
-
-  if (prob < max-target-attract-in-loc)[
-    set robbery-num robbery-num + 1
-  ]
-end
-
-
-to criminal-schedule
-  if (cur-hour = awake-time) [
-    set active? true
-  ]
-
-  if (cur-hour >= return-time and at-home?) and active?[
-    set active? false
-  ]
-
-  if active? [
-    move-agent cur-speed
-  ]
-
-  if at-goal? [
-    ifelse cur-hour >= return-time[
-      set path reverse path
-
-    ][
-      set cur-goal node-goal
-      set path reverse path
-    ]
-   set cur-node 0
-   face item 1 path
-  ]
-
-end
-
-to move-agent [dist] ;; citizen proc
-  let aux_p [path] of self
-
-  if cur-node + 1 < length aux_p [
-
-    let dxnode distance item (cur-node + 1) [path] of self
-
-    if length aux_p > 1 [
-      ifelse dxnode > dist [
-        forward dist
-      ] [
-        set cur-node (cur-node + 1)
-        move-to item cur-node aux_p
-
-        ifelse (cur-node + 1) < length aux_p [
-          face item (cur-node + 1) aux_p
-        ] [
-          face item (cur-node - 1) aux_p
-        ]
-
-        move-agent dist - dxnode
-      ]
-    ]
-  ]
-
+to-report random-normal-in-bounds [mid dev mmin mmax]
+  let result random-normal mid dev
+  if result < mmin or result > mmax
+    [ report random-normal-in-bounds mid dev mmin mmax ]
+  report result
 end
 
 to-report A* [#Start #Goal]
@@ -487,18 +339,199 @@ to-report A* [#Start #Goal]
   report res
 end
 
+to-report heuristic [#Goal]
+  report [distance [localization] of myself] of #Goal
+end
+
 to-report searchers-in-loc
   report searchers with [localization = myself]
 end
+
+to victim-awareness
+  set awareness (victim-record + (1 - affecting-node-attract self))/ 2
+end
+
+to-report teta-at [t]
+  report abs(0.1301 * t - 1.387) / 1.6053;
+end
+
+to environment-attract [t]
+  set attract (attract + attract-sf * ((density * density-weight + teta-at (t - 1) * time-weight + (1 - crime-history) * crime-history-weight) / (density-weight + time-weight + crime-history-weight) - attract))
+end
+
+to crime-history-node
+
+  ifelse recent-crime [
+    set crime-history 1
+    set recent-crime false
+  ][
+    set crime-history crime-history * crime-history-sf
+  ]
+end
+
+to victim-record-update
+  ifelse recent-crime [
+    set victim-record 1
+    set recent-crime false
+  ][
+    set victim-record victim-record * victim-record-sf
+  ]
+end
+
+to target-attract-update
+  set target-attract (((1 - affecting-node-attract self) * guardian-sf + (1 - awareness) * aware-sf) / (guardian-sf + aware-sf))
+end
+
+to-report max-target-attract-in-loc
+  report max-one-of citizens-here [target-attract]
+end
+
+to-report affecting-node-attract [agent]
+  report [attract] of one-of nodes with [xcor = [xcor] of agent and ycor = [ycor] of agent]
+end
+
+to density-at-node [radius]
+  set density count citizens-here
+end
+
+to robbery
+  let prob precision random-normal-in-bounds 0.5 0.5 0 1 4
+
+  let aux_citizen max-target-attract-in-loc
+
+  if aux_citizen != NOBODY and not robbed?[
+    if (prob < [target-attract] of aux_citizen)[
+      set robbery-num robbery-num + 1
+      ask aux_citizen[
+        set recent-crime true
+      ]
+
+      ask nodes-here[
+        set recent-crime true
+      ]
+    ]
+;    show (word "PROB:" prob "  ATTRACT:" [target-attract] of aux_citizen)
+    set encounters-num encounters-num + 1
+    set robbed? true
+  ]
+end
+
+to citizen-schedule
+
+  if (cur-hour = awake-time or cur-hour = return-time) and not active? [
+    set active? true
+  ]
+
+  if (cur-hour >= return-time and at-home?) or (cur-hour > awake-time and cur-hour < return-time and node-goal = cur-goal and at-goal?) and active?[
+    set active? false
+  ]
+
+  ifelse active? [
+    move-agent cur-speed
+  ][
+    if at-goal? [
+      ifelse cur-goal != node-home [
+        set cur-goal node-home
+        set path reverse path
+      ][
+        set cur-goal node-goal
+        set path reverse path
+      ]
+
+    ]
+    set cur-pos 0
+    face item 1 path
+  ]
+
+
+
+end
+
+to criminal-schedule
+  if (cur-hour = awake-time) [
+    set active? true
+    set robbed? false
+    show cur-hour
+  ]
+
+;  if (cur-hour >= return-time and at-home?) and active?[
+;    set active? false
+;  ]
+
+  let dxnode distance cur-goal
+
+  if active?[
+    ifelse cur-speed > 0 [
+      set cur-speed (dxnode - speed)
+    ][
+      move-to cur-goal
+      set cur-speed speed
+      let next_goal one-of [link-neighbors] of cur-goal
+
+      while [next_goal = cur-node and (distance node-home + distance next_goal) > criminal-home-radius][
+        set next_goal one-of [link-neighbors] of cur-goal
+      ]
+
+      set cur-goal next_goal
+    ]
+  ]
+
+end
+
+to move-agent [dist] ;; citizen proc
+  let aux_p [path] of self
+
+  if length aux_p > 1 [
+    ifelse cur-speed > 0 and (cur-pos + 1) < length aux_p[
+      let dxnode distance item (cur-pos + 1) [path] of self
+      set cur-speed (dxnode - dist)
+    ] [
+      if (cur-pos + 1) < length aux_p [
+        set cur-pos (cur-pos + 1)
+        move-to item cur-pos aux_p
+      ]
+
+      ifelse (cur-pos + 1) < length aux_p [
+        face item (cur-pos + 1) aux_p
+      ] [
+        face item (cur-pos - 1) aux_p
+      ]
+      set cur-speed speed
+    ]
+  ]
+
+
+end
+
+to-report at-goal?
+  let flag false
+
+  if xcor = [xcor] of cur-goal and  ycor = [ycor] of cur-goal[
+    set flag true
+  ]
+  report flag
+end
+
+to-report at-home?
+  let flag false
+
+  if xcor = [xcor] of node-home and ycor = [ycor] of node-home[
+    set flag true
+  ]
+
+  report flag
+end
+
+
 @#$#@#$#@
 GRAPHICS-WINDOW
 210
 10
-911
-712
+672
+473
 -1
 -1
-16.90244
+11.0732
 1
 10
 1
@@ -512,8 +545,8 @@ GRAPHICS-WINDOW
 20
 -20
 20
-0
-0
+1
+1
 1
 ticks
 30.0
@@ -593,30 +626,34 @@ SLIDER
 number-of-agents
 number-of-agents
 1
-10000
-1.0
-100
+1000
+101.0
+50
 1
 NIL
 HORIZONTAL
 
-PLOT
-942
-23
-1142
-173
-Robbery
-Hour
-Num of Robbery
-0.0
-100.0
-0.0
-100.0
-true
-false
-"" ""
-PENS
-"default" 1.0 0 -2674135 true "" "plot count robbery-num"
+MONITOR
+952
+81
+1031
+126
+Robberies
+robbery-num
+17
+1
+11
+
+MONITOR
+1057
+84
+1143
+129
+Encounters
+encounters-num
+17
+1
+11
 
 @#$#@#$#@
 ## DO QUE SE TRATA?
